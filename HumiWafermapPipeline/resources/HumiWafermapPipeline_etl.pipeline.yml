@@ -1,0 +1,21 @@
+# The main pipeline for HumiWafermapPipeline
+
+resources:
+  pipelines:
+    HumiWafermapPipeline_etl:
+      name: HumiWafermapPipeline_etl
+      # Catalog is required for serverless compute
+      catalog: main
+      schema: ${var.schema}
+      serverless: true
+      root_path: "../src/HumiWafermapPipeline_etl"
+
+      libraries:
+        - glob:
+            include: ../src/HumiWafermapPipeline_etl/transformations/**
+
+      environment:
+        dependencies:
+          # We include every dependency defined by pyproject.toml by defining an editable environment
+          # that points to the folder where pyproject.toml is deployed.
+          - --editable ${workspace.file_path}
