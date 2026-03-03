@@ -31,8 +31,8 @@ targets:
     workspace:
       host: https://adb-5106020421355827.7.azuredatabricks.net
     variables:
-      catalog: hive_metastore
-      schema: dev
+      catalog: rdhs_test
+      schema: humi_wafermaps
   prod:
     mode: production
     workspace:

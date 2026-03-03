@@ -5,10 +5,14 @@ resources:
     HumiWafermapPipeline_etl:
       name: HumiWafermapPipeline_etl
       # Catalog is required for serverless compute
-      catalog: main
+      catalog: ${var.catalog}
       schema: ${var.schema}
       serverless: true
       root_path: "../src/HumiWafermapPipeline_etl"
+
+      # DLT Notebook - the main pipeline definition
+      notebooks:
+        - path: transformations/dlt_pipeline
 
       libraries:
         - glob:
