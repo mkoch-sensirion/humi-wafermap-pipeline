@@ -10,13 +10,11 @@ resources:
       serverless: true
       root_path: "../src/HumiWafermapPipeline_etl"
 
-      # DLT Notebook - the main pipeline definition
-      notebooks:
-        - path: transformations/dlt_pipeline
-
       libraries:
-        - glob:
-            include: ../src/HumiWafermapPipeline_etl/transformations/**
+        - notebook:
+            path: transformations/dlt_pipeline
+        #- glob:
+        #    include: ../src/HumiWafermapPipeline_etl/transformations/**
 
       environment:
         dependencies:
