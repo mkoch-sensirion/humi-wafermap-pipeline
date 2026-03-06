@@ -11,13 +11,14 @@ resources:
       root_path: "../src/HumiWafermapPipeline_etl"
 
       libraries:
-        - notebook:
-            path: transformations/dlt_pipeline
-        #- glob:
-        #    include: ../src/HumiWafermapPipeline_etl/transformations/**
+        - file:
+            path: ../src/HumiWafermapPipeline_etl/transformations/dlt_pipeline.py
 
       environment:
         dependencies:
           # We include every dependency defined by pyproject.toml by defining an editable environment
           # that points to the folder where pyproject.toml is deployed.
           - --editable ${workspace.file_path}
+          - numpy
+          - scipy
+          - pillow

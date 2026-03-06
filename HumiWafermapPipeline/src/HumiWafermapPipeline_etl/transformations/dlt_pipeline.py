@@ -2,6 +2,8 @@ from itertools import chain
 
 from pyspark import pipelines as dp
 import pyspark.sql.functions as F
+from pyspark.sql.functions import udf
+from pyspark.sql.types import BinaryType
 
 
 # ============================================================================
@@ -10,14 +12,6 @@ import pyspark.sql.functions as F
 
 @dp.table(
     name="silver_wafermap_raw",
-    description=(
-        "Aggregated wafermap measurements by session + L3 series, with XY "
-        "coordinates as dict keys"
-    ),
-    comment=(
-        "One row per substrate per MeasurementSession/SeriesSuffix with "
-        "wafermap: {(X,Y): meas_value}"
-    ),
 )
 def silver_wafermap_raw():
     """
@@ -58,7 +52,7 @@ def silver_wafermap_raw():
         .filter(
             (
                 F.col("MeasurementSeriesStartTime")
-                >= F.lit("2026-02-01")
+                >= F.lit("2026-01-01")
             )
         )  # temporal filter to limit data for testing - adjust as needed
         .select(
@@ -87,7 +81,6 @@ def silver_wafermap_raw():
             "Chip"
         )
         .agg(
-            F.first("Serial").alias("serial"),
             F.map_from_entries(
                 F.collect_list(
                     F.struct(
@@ -100,7 +93,9 @@ def silver_wafermap_raw():
                 )
             ).alias("WafermapDict"),
             F.count("RhMeasurement").alias("MeasurementCount"),
-            F.first("MeasurementSeriesStartTime")
+            F.first("MeasurementSeriesStartTime").alias(
+                "MeasurementSeriesStartTime"
+            )
         )
     )
 
@@ -108,7 +103,6 @@ def silver_wafermap_raw():
         wafermap_data
         .select(
             F.col("WaferNr"),
-            F.col("Serial"),
             F.col("MeasurementSession"),
             F.col("MeasurementSeries"),
             F.col("MeasurementName"),
@@ -122,64 +116,118 @@ def silver_wafermap_raw():
     )
 
 
-# # ============================================================================
-# # BRONZE LAYER: Wafermap normalization and feature extraction
-# # ============================================================================
+# ===================================================================
+# SILVER LAYER: Rasterize wafermap dict to 256x256 image
+# ===================================================================
 
-# @dp.materialized_view(
-#     name="bronze_wafermap_normalized",
-#     description=(
-#         "Normalized wafermap data with standardized values and metadata"
-#     ),
-# )
-# def bronze_wafermap_normalized():
-#     """
-#     Process and normalize wafermap data from silver layer.
+@dp.table(
+    name="silver_wafermap_rasterized",
+)
+def silver_wafermap_rasterized():
+    """
+    Convert WafermapDict to a 256x256 rasterized numpy-like array.
 
-#     - Normalize measurement values to 0-1 range per substrate
-#     - Extract statistical features
-#     - Prepare for image processing or feature extraction
-#     """
-#     source = dp.read_table("silver_wafermap_raw")
+    - Center values by wafer median
+    - Normalize to 0..1
+    - Interpolate onto grid defined by chip limits
+    - Resize to 256x256
+    """
+    import io
+    import numpy as np
+    from scipy.interpolate import griddata
+    from PIL import Image
 
-#     values = F.map_values(F.col("wafermap"))
-#     min_val = F.array_min(values)
-#     max_val = F.array_max(values)
-#     norm_vals = F.transform(
-#         values,
-#         lambda v: F.when(
-#             max_val != min_val,
-#             (v - min_val) / (max_val - min_val)
-#         ).otherwise(F.lit(0.0))
-#     )
+    chip_limits = {
+        "Castor": {"xlim": [10, 232], "ylim": [-5, 439]},
+        "Pollux": {"xlim": [4, 224], "ylim": [8, 444]},
+        "Helena": {"xlim": [6, 250], "ylim": [6, 336]},
+        "Monsun": {"xlim": [2, 107], "ylim": [0, 170]},
+    }
 
-#     return (
-#         source
-#         .select(
-#             F.col("substrate_id"),
-#             F.col("serial"),
-#             F.col("measurement_session"),
-#             F.col("series_suffix"),
-#             F.col("measurement_name"),
-#             F.col("wafermap"),
-#             F.map_from_arrays(
-#                 F.map_keys(F.col("wafermap")),
-#                 norm_vals,
-#             ).alias("wafermap_normalized"),
-#             F.col("measurement_count"),
-#             F.col("latest_measurement_time"),
-#             F.when(
-#                 F.size(values) > 0,
-#                 F.aggregate(
-#                     values,
-#                     F.lit(0.0),
-#                     lambda acc, x: acc + x
-#                 ) / F.size(values)
-#             ).otherwise(F.lit(0.0)).alias("mean_value"),
-#             min_val.alias("min_value"),
-#             max_val.alias("max_value"),
-#             F.current_timestamp().alias("normalized_at"),
-#             F.lit("bronze").alias("layer")
-#         )
-#     )
+    # Optional global min/max for normalization. Set to None to compute per wafer.
+    NORMALIZE_VMIN = None
+    NORMALIZE_VMAX = None
 
+    @udf(BinaryType())
+    def rasterize_udf(wafermap, chip):
+        if wafermap is None or chip not in chip_limits:
+            return None
+
+        limits = chip_limits[chip]
+        xlim = limits["xlim"]
+        ylim = limits["ylim"]
+
+        coords = list(wafermap.keys())
+        values = np.array(list(wafermap.values()), dtype=float)
+
+        if len(coords) == 0:
+            return None
+
+        xs = []
+        ys = []
+        for c in coords:
+            try:
+                xs.append(float(c[0]))
+                ys.append(float(c[1]))
+            except Exception:
+                xs.append(float(c["x"]))
+                ys.append(float(c["y"]))
+
+        xs = np.array(xs)
+        ys = np.array(ys)
+
+        median_val = np.median(values)
+        centered = values - median_val
+
+        vmin = NORMALIZE_VMIN
+        vmax = NORMALIZE_VMAX
+        if vmin is None:
+            vmin = float(np.min(centered))
+        if vmax is None:
+            vmax = float(np.max(centered))
+        if vmax == vmin:
+            normalized = np.zeros_like(centered)
+        else:
+            normalized = (centered - vmin) / (vmax - vmin)
+
+        x_grid, y_grid = np.meshgrid(
+            np.arange(xlim[0], xlim[1] + 1),
+            np.arange(ylim[0], ylim[1] + 1),
+        )
+
+        image_raw = griddata(
+            (xs, ys),
+            normalized,
+            (x_grid, y_grid),
+            method="linear",
+            fill_value=0.0,
+        )
+
+        image_uint8 = (image_raw * 255.0).astype(np.uint8)
+        image_pil = Image.fromarray(image_uint8, mode="L")
+        image_resized = image_pil.resize((256, 256), resample=Image.BILINEAR)
+
+        buffer = io.BytesIO()
+        image_resized.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    source = spark.read.table("silver_wafermap_raw")  # noqa: F821
+
+    return (
+        source
+        .select(
+            F.col("WaferNr"),
+            F.col("MeasurementSession"),
+            F.col("MeasurementSeries"),
+            F.col("MeasurementName"),
+            F.col("Chip"),
+            rasterize_udf(
+                F.col("WafermapDict"),
+                F.col("Chip"),
+            ).alias("WafermapRasterPng"),
+            F.col("MeasurementCount"),
+            F.col("MeasurementSeriesStartTime"),
+            F.current_timestamp().alias("GeneratedAt"),
+            F.lit("silver").alias("layer"),
+        )
+    )
